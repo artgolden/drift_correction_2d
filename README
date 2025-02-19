@@ -1,0 +1,88 @@
+# Drift Correction for 2D z-Projections
+
+This repository contains a Python script that applies drift correction to a folder of 2D z-projections (TIFF files) generated from microscope imaging. The script groups TIFF files by common base name (ignoring the timepoint indicated by `TP-XXXX` in the filename) and processes each group separately. Within each group, the projection with the lowest timepoint is used as the reference image for drift correction.
+
+## Features
+
+- **Grouping by File Name:**  
+  Files are expected to be named in the following format:
+    timelapseID-20250124-114341_SPC-0001_TP-0000_ILL-0_CAM-1_CH-01_PL-0000-outOf-0090.tif
+
+The script groups images sharing the same base name (i.e., everything except the timepoint) and processes them as a set.
+
+- **Reference Image Selection:**  
+In each group, the TIFF file with the lowest timepoint (e.g., `TP-0000`) is automatically chosen as the reference image.
+
+- **Drift Correction:**  
+The drift between the reference and each subsequent image in the group is determined using `dexp.processing.registration.translation_nd`, and the correction is applied with `scipy.ndimage.shift`. A cropping margin is then applied to remove edge artifacts.
+
+- **Logging:**  
+Informative logging messages are printed to the console during processing, detailing progress and any issues encountered.
+
+## Installation
+
+This repository uses [mamba](https://github.com/mamba-org/mamba) for package management. Follow the steps below to create a new environment and install the required dependencies.
+
+1. **Install Mamba (if not already installed):**
+
+   If you don’t have mamba installed, you can install it via conda:
+   ```bash
+   conda install mamba -n base -c conda-forge
+   ```
+
+2. **Create a New Environment and Install Dependencies:**
+
+   ```bash
+   # Create a new environment (here named "drift_correction")
+   mamba create -n drift_correction python=3.9 -y
+   mamba activate drift_correction
+
+   # Install required libraries from conda-forge
+   mamba install -c conda-forge tifffile scipy numpy
+
+   # Install dexp via pip
+   pip install dexp
+   ```
+
+## Usage
+
+1. **Prepare Your TIFF Files:**
+
+   Ensure that your TIFF files follow the naming convention:
+   ```
+   timelapseID-20250124-114341_SPC-0001_TP-0000_ILL-0_CAM-1_CH-01_PL-0000-outOf-0090.tif
+   ```
+   and place them in a dedicated input folder.
+
+2. **Run the Script:**
+
+   The main script is named `drift_correction.py`. To execute it, run:
+
+   ```bash
+   python drift_correction.py /path/to/input_folder /path/to/output_folder --crop_margin 10
+   ```
+
+   - `/path/to/input_folder` is the directory containing your input TIFF images.
+   - `/path/to/output_folder` is the directory where the drift-corrected images will be saved.
+   - `--crop_margin` is an optional argument (default: 10) specifying the number of pixels to crop from each border after drift correction.
+
+## Script Overview
+
+The `drift_correction.py` script performs the following steps:
+
+1. **Grouping Files:**  
+   Uses a regular expression to group TIFF files by their base name (ignoring the timepoint).
+
+2. **Reference Selection:**  
+   For each group, the file with the lowest timepoint is chosen as the reference image.
+
+3. **Drift Correction:**  
+   Each image in the group is corrected relative to the reference image using:
+   - `register_translation_nd` from the dexp package to compute the drift.
+   - `scipy.ndimage.shift` to apply the computed translation.
+   - Cropping with the specified margin to remove edge artifacts.
+
+4. **Saving Results:**  
+   Corrected images are saved to the output folder with the same filename as the input.
+
+
