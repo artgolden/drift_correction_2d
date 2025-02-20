@@ -9,16 +9,15 @@ For example:
     timelapseID-20250124-114341_SPC-0001_TP-0000_ILL-0_CAM-1_CH-01_PL-0000-outOf-0090.tif
 
 Two processing modes are available:
-  1. Merge illuminations (default):  
-     Files with the same prefix and suffix (i.e. the same overall sample and channel)
-     but with different illumination values (ILL) and same timepoint (TP) are merged (averaged)
-     before drift correction. The merged image is saved with "ILL-merged" in the name.
-  2. Treat illuminations separately (--split_ill):  
-     Files with different ILL values are processed as separate groups.
+1. Merge illuminations (default):  
+    Files with the same prefix and suffix (i.e. the same overall sample and channel)
+    but with different illumination values (ILL) and same timepoint (TP) are merged (averaged)
+    before drift correction. The merged image is saved with "ILL-merged" in the name.
+2. Treat illuminations separately (--split_ill):  
+    Files with different ILL values are processed as separate groups.
 
-Within each group (which spans multiple timepoints), the projection with the lowest TP is used
-as the reference image for drift correction. Drift is computed with dexp’s
-`register_translation_nd` and applied using `scipy.ndimage.shift`.
+Drift correction is performed in a chained fashion: the first (lowest TP) image is used as the initial reference,
+and for each consecutive timepoint the previous corrected image is used as reference.
 
 Usage:
     python drift_correction.py /path/to/input_folder /path/to/output_folder --crop_margin 10 [--split_ill]
@@ -35,11 +34,11 @@ import os
 import re
 import argparse
 import logging
+import datetime
 
 import numpy as np
 import tifffile
 from scipy.ndimage import shift as scipy_shift
-import cupy as cp
 
 from dexp.utils import xpArray
 from dexp.utils.backends import Backend, BestBackend, CupyBackend
@@ -123,7 +122,9 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
     Files in file_list are tuples (tp, ill, filename).
     For each unique timepoint, if there are multiple files (with different ILL values), average them.
     The merged image is saved with "ILL-merged" in the filename.
-    Drift correction is performed using the image for the lowest TP as reference.
+    Drift correction is performed in a chained manner:
+      - The first (lowest TP) image is used as the initial reference.
+      - For each consecutive timepoint, the drift is computed relative to the previous corrected image.
     """
     prefix, suffix = group_key
     # Group files by timepoint.
@@ -154,9 +155,9 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
         logging_broadcast("No images found in group for merging.")
         return
 
-    # Use the image with the lowest TP as reference.
+    # Use the image with the lowest TP as initial reference.
     ref_tp, ref_img, ref_out_fname = merged_images[0]
-    logging_broadcast(f"Group '{prefix}{suffix}': Using {ref_out_fname} (TP-{ref_tp:04d}) as reference.")
+    logging_broadcast(f"Group '{prefix}{suffix}': Using {ref_out_fname} (TP-{ref_tp:04d}) as initial reference.")
 
     # Check if the reference image is large enough for cropping.
     if (ref_img.shape[0] <= 2 * crop_margin) or (ref_img.shape[1] <= 2 * crop_margin):
@@ -168,35 +169,39 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
     else:
         use_crop = True
 
+    # Save the reference image (cropped if applicable).
     if use_crop:
-        ref_img_corrected = ref_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+        ref_img_saved = ref_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
     else:
-        ref_img_corrected = ref_img
-
-    # Save the (optionally cropped) reference image.
+        ref_img_saved = ref_img
     ref_out_path = os.path.join(output_dir, ref_out_fname)
-    tifffile.imwrite(ref_out_path, ref_img_corrected)
-    logging_broadcast(f"Group '{prefix}{suffix}': Saved reference image to {ref_out_path}")
+    tifffile.imwrite(ref_out_path, ref_img_saved)
+    logging_broadcast(f"Group '{prefix}{suffix}': Saved initial reference image to {ref_out_path}")
 
-    
+    # Set the initial reference (use the full image for registration).
+    prev_img = ref_img
+
     with BestBackend() as bkg:
+        if isinstance(bkg, CupyBackend):
+            import cupy as cp
         # Process each subsequent timepoint.
         for tp, img, out_fname in merged_images[1:]:
             logging_broadcast(f"Group '{prefix}{suffix}': Processing TP-{tp:04d} ({out_fname}).")
-            # Check image dimensions for cropping.
             if (img.shape[0] <= 2 * crop_margin) or (img.shape[1] <= 2 * crop_margin):
                 logging_broadcast(
                     f"Image for TP-{tp:04d} dimensions {img.shape} are too small for crop margin {crop_margin}. "
                     "Skipping drift correction and cropping."
                 )
                 corrected_img = img
+                prev_img = img  # update reference even if no correction is done
             else:
                 img_copy = img.copy()
                 try:
-                    ref_img_gpu = Backend.to_backend(ref_img)
+                    # Use the previous (corrected) image as the reference.
+                    ref_img_gpu = Backend.to_backend(prev_img)
                     img_gpu = Backend.to_backend(img)
                     if isinstance(bkg, CupyBackend):
-                        ref_img_gpu =  ref_img_gpu.astype(cp.float32)
+                        ref_img_gpu = ref_img_gpu.astype(cp.float32)
                         img_gpu = img_gpu.astype(cp.float32)
                     translation_model = register_translation_nd(ref_img_gpu, img_gpu)
                     logging_broadcast(f"TP-{tp:04d}: Computed shift vector: {translation_model.shift_vector}")
@@ -205,14 +210,20 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
                     else:
                         shift_vec = translation_model.shift_vector
                     shifted_img = scipy_shift(img, shift=shift_vec)
-                    corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+                    if use_crop:
+                        corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+                    else:
+                        corrected_img = shifted_img
+                    # Update the reference image for the next iteration with the full shifted image.
+                    prev_img = shifted_img
                 except Exception as err:
                     logging_broadcast(f"Drift correction failed for TP-{tp:04d}: {err}")
                     corrected_img = img_copy
+                    prev_img = img  # fallback update
 
-        out_path = os.path.join(output_dir, out_fname)
-        tifffile.imwrite(out_path, corrected_img)
-        logging_broadcast(f"Group '{prefix}{suffix}': Saved corrected image to {out_path}")
+            out_path = os.path.join(output_dir, out_fname)
+            tifffile.imwrite(out_path, corrected_img)
+            logging_broadcast(f"Group '{prefix}{suffix}': Saved corrected image to {out_path}")
 
 
 def process_group_split_ill(input_dir, output_dir, group_key, file_list, crop_margin=10):
@@ -221,7 +232,9 @@ def process_group_split_ill(input_dir, output_dir, group_key, file_list, crop_ma
     Files in file_list are tuples (tp, filename).
     If multiple files exist for the same timepoint within this group, they are averaged.
     The group key is (prefix, ill, suffix) and output filenames are left unchanged.
-    Drift correction is performed using the image for the lowest TP as reference.
+    Drift correction is performed in a chained manner:
+      - The image from the lowest TP is used as initial reference.
+      - For each subsequent TP, drift is computed relative to the previous corrected image.
     """
     prefix, ill, suffix = group_key
     # Group files by timepoint.
@@ -246,11 +259,10 @@ def process_group_split_ill(input_dir, output_dir, group_key, file_list, crop_ma
         logging_broadcast("No images found in group.")
         return
 
-    # Use the image with the lowest TP as reference.
+    # Use the image with the lowest TP as initial reference.
     ref_tp, ref_img, ref_out_fname = processed_images[0]
-    logging_broadcast(f"Group '{prefix}_ILL-{ill}{suffix}': Using {ref_out_fname} (TP-{ref_tp:04d}) as reference.")
+    logging_broadcast(f"Group '{prefix}_ILL-{ill}{suffix}': Using {ref_out_fname} (TP-{ref_tp:04d}) as initial reference.")
 
-    # Check cropping possibility.
     if (ref_img.shape[0] <= 2 * crop_margin) or (ref_img.shape[1] <= 2 * crop_margin):
         logging_broadcast(
             f"Reference image dimensions {ref_img.shape} are too small for crop margin {crop_margin}. "
@@ -261,14 +273,14 @@ def process_group_split_ill(input_dir, output_dir, group_key, file_list, crop_ma
         use_crop = True
 
     if use_crop:
-        ref_img_corrected = ref_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+        ref_img_saved = ref_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
     else:
-        ref_img_corrected = ref_img
-
-    # Save the reference image.
+        ref_img_saved = ref_img
     ref_out_path = os.path.join(output_dir, ref_out_fname)
-    tifffile.imwrite(ref_out_path, ref_img_corrected)
-    logging_broadcast(f"Group '{prefix}_ILL-{ill}{suffix}': Saved reference image to {ref_out_path}")
+    tifffile.imwrite(ref_out_path, ref_img_saved)
+    logging_broadcast(f"Group '{prefix}_ILL-{ill}{suffix}': Saved initial reference image to {ref_out_path}")
+
+    prev_img = ref_img
 
     # Process remaining timepoints.
     for tp, img, out_fname in processed_images[1:]:
@@ -279,16 +291,22 @@ def process_group_split_ill(input_dir, output_dir, group_key, file_list, crop_ma
                 "Skipping drift correction and cropping."
             )
             corrected_img = img
+            prev_img = img
         else:
             img_copy = img.copy()
             try:
-                translation_model = register_translation_nd(ref_img, img)
+                translation_model = register_translation_nd(prev_img, img)
                 logging_broadcast(f"TP-{tp:04d}: Computed shift vector: {translation_model.shift_vector}")
                 shifted_img = scipy_shift(img, shift=translation_model.shift_vector)
-                corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+                if use_crop:
+                    corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+                else:
+                    corrected_img = shifted_img
+                prev_img = shifted_img
             except Exception as err:
                 logging_broadcast(f"Drift correction failed for TP-{tp:04d}: {err}")
                 corrected_img = img_copy
+                prev_img = img
 
         out_path = os.path.join(output_dir, out_fname)
         tifffile.imwrite(out_path, corrected_img)
@@ -348,7 +366,18 @@ def main():
     )
     args = parser.parse_args()
 
+    # Ensure output folder exists.
+    os.makedirs(args.output_folder, exist_ok=True)
+
+    # Set up logging to both console and a timestamped log file in the output folder.
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_filename = os.path.join(args.output_folder, f"log_{timestamp}.txt")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    fh = logging.FileHandler(log_filename)
+    fh.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    fh.setFormatter(formatter)
+    logging.getLogger().addHandler(fh)
 
     if args.split_ill:
         process_images_split_ill(args.input_folder, args.output_folder, args.crop_margin)

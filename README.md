@@ -1,3 +1,4 @@
+EXPERIMENTAL! Most of the code and documentation generated with LLMs.
 
 # Drift Correction for 2D z-Projections
 
@@ -29,10 +30,7 @@ This repository uses [mamba](https://github.com/mamba-org/mamba) for package man
 
 1. **Install Mamba (if not already installed):**
 
-   If you don’t have mamba installed, you can install it via conda:
-   ```bash
-   conda install mamba -n base -c conda-forge
-   ```
+   ...
 
 2. **Create a New Environment and Install Dependencies:**
 
@@ -64,10 +62,10 @@ This repository uses [mamba](https://github.com/mamba-org/mamba) for package man
 
    ```bash
    # To merge illuminations (default behavior):
-   python drift_correction.py /path/to/input_folder /path/to/output_folder --crop_margin 10
+   python drift_correction_for_z_proj.py /path/to/input_folder /path/to/output_folder --crop_margin 10
 
    # To treat illuminations separately (no merging):
-   python drift_correction.py /path/to/input_folder /path/to/output_folder --crop_margin 10 --split_ill
+   python drift_correction_for_z_proj.py /path/to/input_folder /path/to/output_folder --crop_margin 10 --split_ill
    ```
 
    - `/path/to/input_folder`: Directory containing your TIFF images.
@@ -79,7 +77,7 @@ This repository uses [mamba](https://github.com/mamba-org/mamba) for package man
 
 ## Script Overview
 
-The `drift_correction.py` script performs the following steps:
+The `drift_correction_for_z_proj.py` script performs the following steps:
 
 1. **Grouping Files:**  
    Uses a regular expression to group TIFF files by their base name (ignoring the timepoint).
