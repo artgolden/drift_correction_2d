@@ -200,7 +200,10 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
                         img_gpu = img_gpu.astype(cp.float32)
                     translation_model = register_translation_nd(ref_img_gpu, img_gpu)
                     logging_broadcast(f"TP-{tp:04d}: Computed shift vector: {translation_model.shift_vector}")
-                    shift_vec = cp.asnumpy(translation_model.shift_vector)
+                    if isinstance(bkg, CupyBackend):
+                        shift_vec = cp.asnumpy(translation_model.shift_vector)
+                    else:
+                        shift_vec = translation_model.shift_vector
                     shifted_img = scipy_shift(img, shift=shift_vec)
                     corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
                 except Exception as err:
