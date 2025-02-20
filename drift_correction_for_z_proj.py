@@ -42,7 +42,7 @@ from scipy.ndimage import shift as scipy_shift
 import cupy as cp
 
 from dexp.utils import xpArray
-from dexp.utils.backends import Backend, BestBackend
+from dexp.utils.backends import Backend, BestBackend, CupyBackend
 
 # Import the drift registration function.
 from dexp.processing.registration.translation_nd import register_translation_nd
@@ -179,7 +179,7 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
     logging_broadcast(f"Group '{prefix}{suffix}': Saved reference image to {ref_out_path}")
 
     
-    with BestBackend():
+    with BestBackend() as bkg:
         # Process each subsequent timepoint.
         for tp, img, out_fname in merged_images[1:]:
             logging_broadcast(f"Group '{prefix}{suffix}': Processing TP-{tp:04d} ({out_fname}).")
@@ -191,19 +191,21 @@ def process_group_merge_ill(input_dir, output_dir, group_key, file_list, crop_ma
                 )
                 corrected_img = img
             else:
-                    img_copy = img.copy()
-                    try:
-                        ref_img_gpu = Backend.to_backend(ref_img).astype(cp.float32)
-                        img_gpu = Backend.to_backend(img).astype(cp.float32)
-                        translation_model = register_translation_nd(ref_img_gpu, img_gpu)
-                        # translation_model = register_translation_nd(ref_img, img)
-                        logging_broadcast(f"TP-{tp:04d}: Computed shift vector: {translation_model.shift_vector}")
-                        shift_vec = cp.asnumpy(translation_model.shift_vector)
-                        shifted_img = scipy_shift(img, shift=shift_vec)
-                        corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
-                    except Exception as err:
-                        logging_broadcast(f"Drift correction failed for TP-{tp:04d}: {err}")
-                        corrected_img = img_copy
+                img_copy = img.copy()
+                try:
+                    ref_img_gpu = Backend.to_backend(ref_img)
+                    img_gpu = Backend.to_backend(img)
+                    if isinstance(bkg, CupyBackend):
+                        ref_img_gpu =  ref_img_gpu.astype(cp.float32)
+                        img_gpu = img_gpu.astype(cp.float32)
+                    translation_model = register_translation_nd(ref_img_gpu, img_gpu)
+                    logging_broadcast(f"TP-{tp:04d}: Computed shift vector: {translation_model.shift_vector}")
+                    shift_vec = cp.asnumpy(translation_model.shift_vector)
+                    shifted_img = scipy_shift(img, shift=shift_vec)
+                    corrected_img = shifted_img[crop_margin:-crop_margin, crop_margin:-crop_margin]
+                except Exception as err:
+                    logging_broadcast(f"Drift correction failed for TP-{tp:04d}: {err}")
+                    corrected_img = img_copy
 
         out_path = os.path.join(output_dir, out_fname)
         tifffile.imwrite(out_path, corrected_img)
