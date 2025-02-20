@@ -2,3 +2,4 @@
 *.tiff
 .vscode
 .vscode/*
+.vscode/launch.json
